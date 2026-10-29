@@ -111,25 +111,25 @@ pub fn page(app: &mut WordApp, ui: &mut Ui) {
     ui.label(RichText::new(tl!("Options")).font(semibold(26.0)));
     ui.add_space(16.0);
     let current = if PANES.contains(&app.ui.options_pane.as_str()) { app.ui.options_pane.clone() } else { "general".to_string() };
+    // A narrow window (crate::compact): the panes as buttons that wrap, above the settings.
+    if crate::compact::is_compact(ui.ctx()) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            for id in PANES {
+                let label = tl!(pane_label(id));
+                let w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.to_string(), semibold(14.0), t.text).size().x) + 24.0;
+                pane_button(app, ui, &t, id, current == id, vec2(w, 36.0));
+            }
+        });
+        ui.add_space(12.0);
+        pane(app, ui, &current);
+        return;
+    }
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             ui.set_width(170.0);
             for id in PANES {
-                let label = tl!(pane_label(id));
-                let active = current == id;
-                let (r, resp) = ui.allocate_exact_size(vec2(170.0, 30.0), egui::Sense::click());
-                resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, label));
-                if active {
-                    ui.painter().rect_filled(r, 4.0, t.checked);
-                } else if resp.hovered() {
-                    ui.painter().rect_filled(r, 4.0, t.hover);
-                }
-                let font = if active { semibold(14.0) } else { crate::theme::regular(14.0) };
-                // Long translations stay inside the row; WidgetInfo above keeps the full name.
-                ui.painter().with_clip_rect(r).text(egui::pos2(r.min.x + 12.0, r.center().y), egui::Align2::LEFT_CENTER, label, font, t.text);
-                if resp.clicked() {
-                    app.ui.options_pane = id.to_string();
-                }
+                pane_button(app, ui, &t, id, current == id, vec2(170.0, 30.0));
             }
         });
         ui.add_space(12.0);
@@ -138,18 +138,39 @@ pub fn page(app: &mut WordApp, ui: &mut Ui) {
         ui.add_space(20.0);
         ui.vertical(|ui| {
             ui.set_max_width(640.0);
-            match current.as_str() {
-                "display" => display(app, ui),
-                "proofing" => proofing(app, ui),
-                "save" => save(app, ui),
-                "language" => language(app, ui),
-                "accessibility" => accessibility(app, ui),
-                "advanced" => advanced(app, ui),
-                "agents" => agents(ui),
-                _ => general(app, ui),
-            }
+            pane(app, ui, &current);
         });
     });
+}
+
+fn pane_button(app: &mut WordApp, ui: &mut Ui, t: &Tokens, id: &str, active: bool, size: egui::Vec2) {
+    let label = tl!(pane_label(id));
+    let (r, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, label));
+    if active {
+        ui.painter().rect_filled(r, 4.0, t.checked);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(r, 4.0, t.hover);
+    }
+    let font = if active { semibold(14.0) } else { crate::theme::regular(14.0) };
+    // Long translations stay inside the row; WidgetInfo above keeps the full name.
+    ui.painter().with_clip_rect(r).text(egui::pos2(r.min.x + 12.0, r.center().y), egui::Align2::LEFT_CENTER, label, font, t.text);
+    if resp.clicked() {
+        app.ui.options_pane = id.to_string();
+    }
+}
+
+fn pane(app: &mut WordApp, ui: &mut Ui, current: &str) {
+    match current {
+        "display" => display(app, ui),
+        "proofing" => proofing(app, ui),
+        "save" => save(app, ui),
+        "language" => language(app, ui),
+        "accessibility" => accessibility(app, ui),
+        "advanced" => advanced(app, ui),
+        "agents" => agents(ui),
+        _ => general(app, ui),
+    }
 }
 
 fn section(ui: &mut Ui, title: &str) {

@@ -374,7 +374,8 @@ fn main() -> eframe::Result {
             .with_title("WordCraft")
             .with_app_id("ai.storyteller.wordcraft")
             .with_inner_size([1440.0, 920.0])
-            .with_min_inner_size([760.0, 480.0])
+            // Narrow enough for the compact (phone) layout, ui_egui::compact.
+            .with_min_inner_size([320.0, 480.0])
             .with_drag_and_drop(true)
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)

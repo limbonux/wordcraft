@@ -231,6 +231,8 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
     let bar = app.mac_titlebar;
     let left = if mac { bar.content_left as i8 } else { 8 };
     let control_h = if mac { 22.0 } else { 26.0 };
+    // A narrow window (crate::compact) keeps Quick Access, Search as an icon and the account.
+    let compact = crate::compact::is_compact(ui.ctx());
     egui::Panel::top("title_bar")
         .exact_size(if mac { bar.height } else { 38.0 })
         .frame(egui::Frame::NONE.fill(t.title_bar).inner_margin(egui::Margin { left, right: 10, top: 0, bottom: 0 }))
@@ -253,33 +255,35 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                 // cover the document (#196, #176); clicking it then offers Save As where that helps.
                 let block = app.autosave_block();
                 let on = app.autosaves();
-                let label = if block.is_some() { t.text_dim.gamma_multiply(0.6) } else { t.text_dim };
-                ui.label(egui::RichText::new(tl!("AutoSave")).font(regular(11.5)).color(label));
-                let (r, resp) = ui.allocate_exact_size(vec2(30.0, 16.0), Sense::click());
-                let (fill, stroke, knob_fill) = match (&block, on) {
-                    (Some(_), _) => (t.input.gamma_multiply(0.5), t.border.gamma_multiply(0.7), t.text_dim.gamma_multiply(0.45)),
-                    (None, true) => (t.accent, t.accent, t.on_accent),
-                    (None, false) => (t.input, t.border_strong, t.text_dim),
-                };
-                ui.painter().rect(r, 8.0, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
-                let knob = if on { r.max.x - 8.0 } else { r.min.x + 8.0 };
-                ui.painter().circle_filled(pos2(knob, r.center().y), 5.0, knob_fill);
-                let tip = block
-                    .as_ref()
-                    .map_or_else(|| tl!("AutoSave saves every change to the file (needs a saved document)").to_string(), |b| b.reason());
-                if resp.on_hover_text(tip).clicked() {
-                    match block {
-                        None => {
-                            let _ = app.run("file.autosave", json!({}));
+                if !compact {
+                    let label = if block.is_some() { t.text_dim.gamma_multiply(0.6) } else { t.text_dim };
+                    ui.label(egui::RichText::new(tl!("AutoSave")).font(regular(11.5)).color(label));
+                    let (r, resp) = ui.allocate_exact_size(vec2(30.0, 16.0), Sense::click());
+                    let (fill, stroke, knob_fill) = match (&block, on) {
+                        (Some(_), _) => (t.input.gamma_multiply(0.5), t.border.gamma_multiply(0.7), t.text_dim.gamma_multiply(0.45)),
+                        (None, true) => (t.accent, t.accent, t.on_accent),
+                        (None, false) => (t.input, t.border_strong, t.text_dim),
+                    };
+                    ui.painter().rect(r, 8.0, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+                    let knob = if on { r.max.x - 8.0 } else { r.min.x + 8.0 };
+                    ui.painter().circle_filled(pos2(knob, r.center().y), 5.0, knob_fill);
+                    let tip = block
+                        .as_ref()
+                        .map_or_else(|| tl!("AutoSave saves every change to the file (needs a saved document)").to_string(), |b| b.reason());
+                    if resp.on_hover_text(tip).clicked() {
+                        match block {
+                            None => {
+                                let _ = app.run("file.autosave", json!({}));
+                            }
+                            // AutoSave comes on once Save As has saved (maybe on a later frame, #94).
+                            Some(b) if b.save_as_helps() => {
+                                let _ = app.save_as(crate::file_dialogs::AfterSave::AutoSave);
+                            }
+                            Some(b) => app.status(b.reason()),
                         }
-                        // AutoSave comes on once Save As has saved (maybe on a later frame, #94).
-                        Some(b) if b.save_as_helps() => {
-                            let _ = app.save_as(crate::file_dialogs::AfterSave::AutoSave);
-                        }
-                        Some(b) => app.status(b.reason()),
                     }
+                    ui.add_space(8.0);
                 }
-                ui.add_space(8.0);
                 quick_access(ui, app);
                 qat_end = ui.min_rect().max.x;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -293,7 +297,7 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                         let _ = app.run("ui.backstage", json!({"value": true, "page": "options", "pane": "general"}));
                     }
                     ui.add_space(8.0);
-                    if app.ui.show_discord {
+                    if app.ui.show_discord && !compact {
                         let (r, resp) = ui.allocate_exact_size(vec2(84.0, 22.0), Sense::click());
                         ui.painter().rect_filled(r, 11.0, if resp.hovered() { t.accent_text } else { t.accent });
                         icons::paint(
@@ -310,7 +314,7 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                         ui.add_space(8.0);
                     }
                     // Search ("Tell me").
-                    let (r, resp) = ui.allocate_exact_size(vec2(260.0, control_h), Sense::click());
+                    let (r, resp) = ui.allocate_exact_size(vec2(if compact { control_h + 6.0 } else { 260.0 }, control_h), Sense::click());
                     ui.painter().rect(r, 6.0, if resp.hovered() { t.input } else { t.ribbon }, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
                     icons::paint(
                         ui.painter(),
@@ -322,15 +326,17 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                     let ph = tl!("Search commands and help");
                     let pfont = TypeRung::Control.regular();
                     let ptrack = TypeRung::Control.tracking();
-                    paint_text(
-                        ui.painter(),
-                        pos2(r.min.x + 30.0, r.center().y - TypeRung::Control.line_height() / 2.0),
-                        Align2::LEFT_TOP,
-                        ph,
-                        &pfont,
-                        ptrack,
-                        t.text_dim,
-                    );
+                    if !compact {
+                        paint_text(
+                            ui.painter(),
+                            pos2(r.min.x + 30.0, r.center().y - TypeRung::Control.line_height() / 2.0),
+                            Align2::LEFT_TOP,
+                            ph,
+                            &pfont,
+                            ptrack,
+                            t.text_dim,
+                        );
+                    }
                     if app.ui.keytips == crate::keytips::Phase::Tabs {
                         app.keytip_rects.push((r, crate::keytips::SEARCH_LETTER.to_string()));
                     }

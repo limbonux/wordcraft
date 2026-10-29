@@ -117,6 +117,8 @@ pub struct CanvasState {
     pub(crate) wheel: crate::scroll::CanvasScroll,
     /// Middle-click scrolling (#1065).
     pub(crate) auto_scroll: crate::autoscroll::AutoScroll,
+    /// Fingers on the page: scroll, tap, long press, selection handles (crate::touch).
+    pub(crate) touch: crate::touch::Touch,
     /// The scroll offset and its maximum at the end of last frame.
     pub(crate) scroll_offset: egui::Vec2,
     scroll_max: egui::Vec2,
@@ -233,6 +235,7 @@ impl Default for CanvasState {
             alt_code_echo: None,
             wheel: Default::default(),
             auto_scroll: Default::default(),
+            touch: Default::default(),
             scroll_offset: egui::Vec2::ZERO,
             scroll_max: egui::Vec2::ZERO,
             scroll_request: None,
@@ -434,6 +437,14 @@ fn place_pages(sizes: &[(f32, f32)], markup: f32, scale: f32, cols: usize, avail
         y += h + GAP;
     }
     (rects, vec2(content_w, y.max(avail.y)))
+}
+
+/// The Web Layout text width (pt) for a canvas `avail_w` px wide at `scale` px/pt: the canvas
+/// less its scroll bar, the page gaps and the markup area, never under the layout's 144 pt floor.
+fn web_width(avail_w: f32, scale: f32, markup: f32) -> f32 {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { PX_PER_PT };
+    let w = (avail_w - 14.0 - 2.0 * GAP) / scale - markup;
+    if w.is_finite() { w.clamp(144.0, 20_000.0) } else { 800.0 }
 }
 
 /// Reading columns use readable text at the user's chosen zoom. The window holds roughly 3–5
@@ -827,6 +838,13 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         app.canvas.alt_code.clear();
     }
     crate::ink::replay_tick(app, ui.ctx());
+    // Web Layout wraps the text to the window, as in Word (a phone, crate::compact, included).
+    if app.session.view.mode == wordcraft_layout::ViewMode::Web && !app.session.view.read_mode {
+        let w = web_width(full.width(), app.session.view.zoom.clamp(0.1, 5.0) * PX_PER_PT, markup_width(app));
+        if (app.session.view.web_width - w).abs() > 0.5 {
+            app.session.view.web_width = w;
+        }
+    }
     let layout = app.session.layout();
     if let Some(anchor) = reflow_anchor
         && let Some(page) = reading_anchor_page(&layout, &anchor)
@@ -838,7 +856,10 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     // View › Switch Modes: dark paper, inverted document colours.
     let dark_page = app.session.view.dark_mode;
     let dark_paper = wordcraft_render::DARK_PAPER;
-    let show_ruler = app.session.view.ruler && app.session.view.mode == wordcraft_layout::ViewMode::Print && !app.session.view.read_mode;
+    let show_ruler = app.session.view.ruler
+        && app.session.view.mode == wordcraft_layout::ViewMode::Print
+        && !app.session.view.read_mode
+        && !crate::compact::is_compact(ui.ctx());
     let (hruler, vruler, area) = if show_ruler {
         let h = Rect::from_min_max(pos2(full.min.x + RULER, full.min.y), pos2(full.max.x, full.min.y + RULER));
         let v = Rect::from_min_max(pos2(full.min.x, full.min.y + RULER), pos2(full.min.x + RULER, full.max.y));
@@ -1003,7 +1024,9 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     } else {
         app.canvas.auto_scroll.update(ui, area)
     };
-    let delta = wheel_delta + auto_delta + middle_delta;
+    // A finger dragged on the page scrolls it (crate::touch).
+    let touch_delta = crate::touch::frame(app, ui, area, &layout);
+    let delta = wheel_delta + auto_delta + middle_delta + touch_delta;
     let mut scroll_area = egui::ScrollArea::both()
         .id_salt("canvas_scroll")
         .auto_shrink([false, false])
@@ -1447,8 +1470,13 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     let keyboard_click = ui.memory(|m| m.has_focus(resp.id)) && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
     let pointer_click = resp.clicked_by(egui::PointerButton::Primary);
     let accesskit_click = resp.clicked() && !pointer_click && !keyboard_click;
-    let focus_click = pointer_click || accesskit_click || resp.drag_started();
-    if focus_click || (app.canvas.want_focus && !resp.has_focus()) {
+    // A finger doesn't take the keyboard by pressing, scrolling or long-pressing (it would pop
+    // up the on-screen one): crate::touch asks for it on a tap, and a button tapped while it was
+    // up gives it back (Touch::may_focus).
+    let touch = app.canvas.touch.active;
+    let focus_click = (pointer_click && !touch) || accesskit_click || (resp.drag_started() && !touch);
+    let want_focus = app.canvas.want_focus && app.canvas.touch.may_focus();
+    if focus_click || (want_focus && !resp.has_focus()) {
         resp.request_focus();
     }
     if focus_click || app.canvas.want_focus {
@@ -1465,6 +1493,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     crate::a11y::expose(app, ui.ctx(), resp.id, &layout, &rects, area);
     // The buttons that start or stop middle-click scrolling don't also click the page.
     let middle_gesture = app.canvas.auto_scroll.blocks_input();
+    crate::touch::paint_handles(app, ui.painter(), &layout, &rects, geo.scale);
     // Double-click the space between two pages (or the line between them) to hide or show it.
     if resp.double_clicked()
         && app.session.view.mode == wordcraft_layout::ViewMode::Print
@@ -1474,8 +1503,9 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     {
         let _ = app.run("view.hideWhiteSpace", json!({"value": !app.session.view.hide_white_space}));
     } else
-    // Draw Table / Eraser own the mouse while on (no caret moves); else the usual editing.
-    if !middle_gesture && !crate::table_pen::pointer(app, ui, &resp, &rects, &layout, geo.scale) {
+    // Draw Table / Eraser own the mouse while on (no caret moves); else the usual editing. A
+    // finger's emulated mouse is left alone: crate::touch handled the finger.
+    if !middle_gesture && !app.canvas.touch.active && !crate::table_pen::pointer(app, ui, &resp, &rects, &layout, geo.scale) {
         mouse(app, ui, &resp, &rects, &layout, geo.scale);
     }
     // A click on a check box ticks it; on a list's button opens the list.
@@ -3066,6 +3096,21 @@ mod tests {
     /// What `page_image` replaced: the raster un-premultiplied, for egui to premultiply again.
     fn by_straight_alpha(img: &wordcraft_render::Rendered) -> egui::ColorImage {
         egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.to_straight())
+    }
+
+    /// Web Layout wraps to the window: wider windows, wider text; the markup area, a zoom and
+    /// a phone-narrow or hostile width keep it sane.
+    #[test]
+    fn web_layout_text_width_follows_the_window() {
+        let at_100 = web_width(1000.0, PX_PER_PT, 0.0);
+        assert!((at_100 - (1000.0 - 14.0 - 2.0 * GAP) / PX_PER_PT).abs() < 0.01);
+        assert!(web_width(1400.0, PX_PER_PT, 0.0) > at_100);
+        assert!((web_width(1000.0, PX_PER_PT, 216.0) - (at_100 - 216.0)).abs() < 0.01, "balloons keep their room");
+        assert!((web_width(1000.0, 2.0 * PX_PER_PT, 0.0) - at_100 / 2.0).abs() < 0.01, "zoomed in, fewer points fit");
+        assert_eq!(web_width(100.0, PX_PER_PT, 0.0), 144.0, "never under the layout's floor");
+        for (w, s) in [(f32::NAN, PX_PER_PT), (1000.0, 0.0), (f32::INFINITY, PX_PER_PT), (1000.0, f32::NAN)] {
+            assert!(web_width(w, s, 0.0).is_finite());
+        }
     }
 
     #[test]

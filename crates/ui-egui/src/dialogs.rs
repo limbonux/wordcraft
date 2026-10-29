@@ -1213,12 +1213,20 @@ const DIALOG_CENTRED_FRAMES: u8 = 2;
 /// that, so dragging the title bar moves it (#732). egui keeps it on screen if it grows past the
 /// bottom.
 fn place_dialog<'a>(ctx: &egui::Context, id: egui::Id, w: egui::Window<'a>) -> egui::Window<'a> {
+    // A narrow window (crate::compact): the dialog takes the window's width, near the top.
+    if crate::compact::is_compact(ctx) {
+        let width = (ctx.content_rect().width() - 2.0 * COMPACT_DIALOG_MARGIN).max(0.0);
+        return w.anchor(egui::Align2::CENTER_TOP, vec2(0.0, COMPACT_DIALOG_MARGIN)).min_width(width).max_width(width);
+    }
     let w = w.pivot(egui::Align2::CENTER_TOP);
     match ctx.data(|d| d.get_temp::<(egui::Id, u8)>(dialog_top_key())) {
         Some((open, frames)) if open == id && frames >= DIALOG_CENTRED_FRAMES => w,
         _ => w.anchor(egui::Align2::CENTER_CENTER, vec2(0.0, -40.0)),
     }
 }
+
+/// A dialog's distance from the window's edges in the compact layout.
+const COMPACT_DIALOG_MARGIN: f32 = 8.0;
 
 /// After a frame of a dialog: counts the frames it has been centred for.
 fn count_dialog_frame(ctx: &egui::Context, id: egui::Id) {
@@ -1292,9 +1300,19 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
         Dialog::Layout(d) => d.title(),
     };
     let id = egui::Id::new(("dialog", title));
+    // In a narrow window (crate::compact) a dialog wider or taller than the window scrolls.
+    let compact = crate::compact::is_compact(ctx);
+    let max_h = ctx.content_rect().height() - 2.0 * COMPACT_DIALOG_MARGIN - 48.0;
     let shown = place_dialog(ctx, id, egui::Window::new(tl!(title)).id(id).collapsible(false).resizable(false)).open(&mut open).show(ctx, |ui| {
-        ui.set_min_width(340.0);
-        close = body(app, ui, &mut d);
+        if compact {
+            egui::ScrollArea::both().id_salt("compact_dialog").max_height(max_h.max(120.0)).show(ui, |ui| {
+                ui.set_min_width(340.0);
+                close = body(app, ui, &mut d);
+            });
+        } else {
+            ui.set_min_width(340.0);
+            close = body(app, ui, &mut d);
+        }
     });
     if shown.is_some() {
         count_dialog_frame(ctx, id);

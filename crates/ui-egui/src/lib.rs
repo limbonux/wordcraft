@@ -29,6 +29,7 @@ pub mod canvas;
 pub mod caret_glide;
 pub mod chrome;
 pub mod colors;
+pub mod compact;
 pub mod content_controls;
 pub mod control;
 pub mod credits;
@@ -79,6 +80,7 @@ pub mod table_pen;
 pub mod table_resize;
 pub mod table_ruler;
 pub mod theme;
+pub mod touch;
 pub mod widgets;
 pub mod window_geometry;
 pub mod wordart_menus;
@@ -513,6 +515,10 @@ pub struct WordApp {
     pub(crate) smart_art_typing: Option<usize>,
     /// The tab shown before Outline view brought up the Outlining tab (restored when it closes).
     pub(crate) outline_prev_tab: Option<String>,
+    /// The compact (phone) layout is on, with the view it replaced, restored on widening ([`compact`]).
+    pub(crate) compact_prev_mode: Option<wordcraft_layout::ViewMode>,
+    /// The compact layout shows the full ribbon under its toolbar (More).
+    pub(crate) compact_ribbon: bool,
     /// Zotero commands in flight (`ui.zotero.*`).
     pub zotero: zotero::ZoteroLink,
     /// The egui context, once the first frame has run (background work wakes the UI with it).
@@ -622,6 +628,8 @@ impl WordApp {
             smart_art_item: None,
             smart_art_typing: None,
             outline_prev_tab: None,
+            compact_prev_mode: None,
+            compact_ribbon: false,
             zotero: zotero::ZoteroLink::default(),
             ctx: None,
             read_aloud_at: None,
@@ -2001,19 +2009,20 @@ impl WordApp {
         if self.session.view.focus_mode && self.dialog.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             let _ = self.run("view.focus", json!({"value": false}));
         }
+        compact::follow_width(self, &ctx);
+        // Whether this frame draws the page: a click that closes File draws no page until the next.
+        let page_drawn = !self.ui.backstage && self.has_document();
         if self.ui.backstage {
             backstage::show(self, ui);
         } else if !self.has_document() {
             // No document open (#1129): the ribbon greyed out but for Help, and no page.
             chrome::title_bar(self, ui);
-            ribbon::show(self, ui);
-            chrome::status_bar(self, ui);
+            self.ribbon(ui);
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |_| {});
         } else {
             chrome::title_bar(self, ui);
             if !self.session.view.focus_mode {
-                ribbon::show(self, ui);
-                chrome::status_bar(self, ui);
+                self.ribbon(ui);
                 panes::show(self, ui);
             }
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
@@ -2029,7 +2038,9 @@ impl WordApp {
         read_aloud::show(self, &ctx);
         crate::keytips::show(self, &ctx, ui);
         keys::global_shortcuts(self, &ctx);
-        self.refocus_after_chrome_click(&ctx);
+        if page_drawn {
+            self.refocus_after_chrome_click(&ctx);
+        }
         if let Some(url) = self.canvas.open_url.take() {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
@@ -2046,6 +2057,19 @@ impl WordApp {
         self.frame_ms = now_ms() - t0;
         // Typing and formatting land here, after `logic` has reported.
         self.report_dirty();
+    }
+
+    /// The ribbon and the status bar; in a narrow window the compact toolbar at the bottom, or
+    /// its sheet of every command (More), and no status bar.
+    fn ribbon(&mut self, ui: &mut egui::Ui) {
+        if !compact::is_compact(ui.ctx()) {
+            ribbon::show(self, ui);
+            chrome::status_bar(self, ui);
+        } else if self.compact_ribbon {
+            compact::sheet(self, ui);
+        } else {
+            compact::toolbar(self, ui);
+        }
     }
 
     /// Carry View › Full Screen (`view.fullScreen`, F11) to the window, and follow the window
@@ -2082,6 +2106,10 @@ impl WordApp {
         }
         #[cfg(not(target_arch = "wasm32"))]
         if self.file_browser.open.is_some() {
+            return;
+        }
+        // On a touch screen the keyboard stays down if it was (crate::touch).
+        if !self.canvas.touch.may_refocus() {
             return;
         }
         let Some(pos) = ctx.input(|i| if i.pointer.any_click() { i.pointer.interact_pos() } else { None }) else { return };
